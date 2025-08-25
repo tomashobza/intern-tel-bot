@@ -85,7 +85,7 @@ class InternshipMonitor:
     def setup_logging(self):
         """Configure logging for the application"""
         logging.basicConfig(
-            level=logging.INFO,
+            level=logging.INFO,  # Back to normal logging level
             format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
             handlers=[
                 logging.FileHandler('internship_monitor.log'),
@@ -607,10 +607,13 @@ class InternshipMonitor:
                         jobs = await scraper.scrape(scraper_input, job_details=False)
                         
                         for job in jobs:
-                            company = job.company if hasattr(job, 'company') else ''
+                            # Extract company name - job.company is a Company object with name attribute
+                            company = job.company.name if hasattr(job, 'company') and job.company else ''
                             title = job.title if hasattr(job, 'title') else ''
                             job_location = job.location if hasattr(job, 'location') else location
-                            url = job.url if hasattr(job, 'url') else ''
+                            
+                            # Extract URL from job object - jobpilot uses 'link' attribute
+                            url = job.link if hasattr(job, 'link') else ''
                             
                             # Filter out target companies (already scraped directly)
                             excluded_companies = ['Apple', 'Microsoft', 'Google', 'Meta', 'Nvidia', 'Spotify', 'Palantir']
@@ -623,9 +626,10 @@ class InternshipMonitor:
                             ]
                             
                             is_internship = any(keyword in title.lower() for keyword in internship_keywords)
+                            is_swe = self.is_swe_role(title)
                             
                             if (company not in excluded_companies and 
-                                self.is_swe_role(title) and 
+                                is_swe and 
                                 is_internship and
                                 url):
                                 
@@ -728,7 +732,7 @@ class InternshipMonitor:
             f"Found {len(internships)} SWE internships in EU/UK:\n"
         ]
         
-        for company, company_internships in sorted(by_company.items()):
+        for company, company_internships in sorted(by_company.items(), key=lambda x: str(x[0])):
             message_parts.append(f"**{company}** ({len(company_internships)} positions):")
             for internship in company_internships:
                 location_text = f" - {internship.location}" if internship.location else ""
@@ -738,22 +742,70 @@ class InternshipMonitor:
         return "\n".join(message_parts)
 
     def send_telegram_message(self, message: str) -> bool:
-        """Send message via Telegram bot"""
+        """Send message via Telegram bot, splitting if too long"""
         try:
             telegram_url = f"https://api.telegram.org/bot{self.config['telegram_bot_token']}/sendMessage"
             
-            payload = {
-                'chat_id': self.config['telegram_chat_id'],
-                'text': message,
-                'parse_mode': 'Markdown',
-                'disable_web_page_preview': True
-            }
+            # Telegram message limit is 4096 characters
+            max_length = 4000  # Leave some buffer
             
-            response = self.session.post(telegram_url, json=payload, timeout=self.config['request_timeout'])
-            response.raise_for_status()
-            
-            self.logger.info("Telegram message sent successfully")
-            return True
+            if len(message) <= max_length:
+                # Send single message
+                payload = {
+                    'chat_id': self.config['telegram_chat_id'],
+                    'text': message,
+                    'parse_mode': 'Markdown',
+                    'disable_web_page_preview': True
+                }
+                
+                response = self.session.post(telegram_url, json=payload, timeout=self.config['request_timeout'])
+                response.raise_for_status()
+                self.logger.info("Telegram message sent successfully")
+                return True
+            else:
+                # Split message into multiple parts
+                lines = message.split('\n')
+                current_message = ""
+                message_count = 0
+                
+                for line in lines:
+                    if len(current_message + line + '\n') > max_length:
+                        # Send current message
+                        if current_message.strip():
+                            message_count += 1
+                            header = f"📋 **Part {message_count}**\n\n" if message_count > 1 else ""
+                            
+                            payload = {
+                                'chat_id': self.config['telegram_chat_id'],
+                                'text': header + current_message.strip(),
+                                'parse_mode': 'Markdown',
+                                'disable_web_page_preview': True
+                            }
+                            
+                            response = self.session.post(telegram_url, json=payload, timeout=self.config['request_timeout'])
+                            response.raise_for_status()
+                            
+                        current_message = line + '\n'
+                    else:
+                        current_message += line + '\n'
+                
+                # Send remaining message
+                if current_message.strip():
+                    message_count += 1
+                    header = f"📋 **Part {message_count}**\n\n" if message_count > 1 else ""
+                    
+                    payload = {
+                        'chat_id': self.config['telegram_chat_id'],
+                        'text': header + current_message.strip(),
+                        'parse_mode': 'Markdown',
+                        'disable_web_page_preview': True
+                    }
+                    
+                    response = self.session.post(telegram_url, json=payload, timeout=self.config['request_timeout'])
+                    response.raise_for_status()
+                
+                self.logger.info(f"Telegram message sent successfully in {message_count} parts")
+                return True
             
         except Exception as e:
             self.logger.error(f"Failed to send Telegram message: {e}")
